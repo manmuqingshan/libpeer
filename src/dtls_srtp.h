@@ -4,8 +4,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#if defined(__has_include)
+#if __has_include(<mbedtls/ctr_drbg.h>)
+#include <mbedtls/ctr_drbg.h>
+#else
+#include <mbedtls/private/ctr_drbg.h>
+#endif
+#if __has_include(<mbedtls/entropy.h>)
+#include <mbedtls/entropy.h>
+#else
+#include <mbedtls/private/entropy.h>
+#endif
+#else
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
+#endif
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/ssl_cookie.h>
@@ -44,6 +57,9 @@ typedef struct DtlsSrtp {
   mbedtls_ssl_cookie_ctx cookie_ctx;
   mbedtls_x509_crt cert;
   mbedtls_pk_context pkey;
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+  mbedtls_svc_key_id_t psa_key_id;
+#endif
   mbedtls_entropy_context entropy;
   mbedtls_ctr_drbg_context ctr_drbg;
 
