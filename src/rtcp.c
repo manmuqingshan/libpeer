@@ -10,7 +10,8 @@ int rtcp_probe(uint8_t* packet, size_t size) {
     return -1;
 
   RtpHeader* header = (RtpHeader*)packet;
-  return ((header->type >= 64) && (header->type < 96));
+  uint8_t type = rtp_header_type(header);
+  return ((type >= 64) && (type < 96));
 }
 
 int rtcp_get_pli(uint8_t* packet, int len, uint32_t ssrc) {
@@ -19,9 +20,7 @@ int rtcp_get_pli(uint8_t* packet, int len, uint32_t ssrc) {
 
   memset(packet, 0, len);
   RtcpHeader* rtcp_header = (RtcpHeader*)packet;
-  rtcp_header->version = 2;
-  rtcp_header->type = RTCP_PSFB;
-  rtcp_header->rc = 1;
+  rtcp_header_init(rtcp_header, RTCP_PSFB, 1);
   rtcp_header->length = htons((len / 4) - 1);
   memcpy(packet + 8, &ssrc, 4);
 
@@ -38,9 +37,7 @@ int rtcp_get_fir(uint8_t* packet, int len, int* seqnr) {
   if (*seqnr < 0 || *seqnr >= 256)
     *seqnr = 0;
 
-  rtcp->version = 2;
-  rtcp->type = RTCP_PSFB;
-  rtcp->rc = 4;
+  rtcp_header_init(rtcp, RTCP_PSFB, 4);
   rtcp->length = htons((len / 4) - 1);
   RtcpFb* rtcp_fb = (RtcpFb*)rtcp;
   RtcpFir* fir = (RtcpFir*)rtcp_fb->fci;

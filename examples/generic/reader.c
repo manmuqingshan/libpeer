@@ -24,7 +24,7 @@ int reader_init() {
   FILE* video_fp = NULL;
   FILE* audio_fp = NULL;
   char videofile[] = "test.264";
-  char audiofile[] = "alaw08m.wav";
+  char audiofile[] = "test.wav";
 
   video_fp = fopen(videofile, "rb");
 

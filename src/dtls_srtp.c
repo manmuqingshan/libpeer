@@ -25,8 +25,6 @@ int dtls_srtp_udp_send(void* ctx, const uint8_t* buf, size_t len) {
 
   int ret = udp_socket_sendto(udp_socket, dtls_srtp->remote_addr, buf, len);
 
-  LOGD("dtls_srtp_udp_send (%d)", ret);
-
   return ret;
 }
 
@@ -39,8 +37,6 @@ int dtls_srtp_udp_recv(void* ctx, uint8_t* buf, size_t len) {
   while ((ret = udp_socket_recvfrom(udp_socket, &udp_socket->bind_addr, buf, len)) <= 0) {
     ports_sleep_ms(1);
   }
-
-  LOGD("dtls_srtp_udp_recv (%d)", ret);
 
   return ret;
 }
@@ -341,6 +337,7 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
   mbedtls_pk_init(&dtls_srtp->pkey);
   mbedtls_entropy_init(&dtls_srtp->entropy);
   mbedtls_ctr_drbg_init(&dtls_srtp->ctr_drbg);
+  dtls_srtp->initialized = 1;
 
 #if MBEDTLS_VERSION_NUMBER >= 0x04000000
   if (psa_crypto_init() != PSA_SUCCESS) {
@@ -395,7 +392,14 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
   }
 
   mbedtls_ssl_conf_verify(&dtls_srtp->conf, dtls_srtp_cert_verify, NULL);
-  mbedtls_ssl_conf_authmode(&dtls_srtp->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+  /*
+   * WebRTC peers use self-signed certificates and authenticate them with the
+   * fingerprint carried in SDP.  VERIFY_REQUIRED makes Mbed TLS 4.x require a
+   * TLS hostname as well, which does not exist for DTLS-SRTP peers.  Request
+   * and retain the peer certificate here, then verify its SHA-256 fingerprint
+   * after the handshake below.
+   */
+  mbedtls_ssl_conf_authmode(&dtls_srtp->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
   mbedtls_ssl_conf_ca_chain(&dtls_srtp->conf, &dtls_srtp->cert, NULL);
 
   ret = mbedtls_ssl_conf_own_cert(&dtls_srtp->conf, &dtls_srtp->cert, &dtls_srtp->pkey);
@@ -433,6 +437,10 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
 }
 
 void dtls_srtp_deinit(DtlsSrtp* dtls_srtp) {
+  if (!dtls_srtp->initialized) {
+    return;
+  }
+
   mbedtls_ssl_free(&dtls_srtp->ssl);
   mbedtls_ssl_config_free(&dtls_srtp->conf);
 
@@ -456,6 +464,8 @@ void dtls_srtp_deinit(DtlsSrtp* dtls_srtp) {
     srtp_dealloc(dtls_srtp->srtp_in);
     srtp_dealloc(dtls_srtp->srtp_out);
   }
+
+  dtls_srtp->initialized = 0;
 }
 
 static int dtls_srtp_key_derivation(DtlsSrtp* dtls_srtp, const unsigned char* master_secret, size_t secret_len, const unsigned char* randbytes, size_t randbytes_len, mbedtls_tls_prf_types tls_prf_type) {
@@ -547,7 +557,6 @@ static int dtls_srtp_key_derivation(DtlsSrtp* dtls_srtp, const unsigned char* ma
   }
 
   LOGI("Created outbound SRTP session");
-  dtls_srtp->state = DTLS_SRTP_STATE_CONNECTED;
   return 0;
 }
 
@@ -616,9 +625,17 @@ static int dtls_srtp_handshake_server(DtlsSrtp* dtls_srtp) {
   while (1) {
     unsigned char client_ip[] = "test";
 
-    mbedtls_ssl_session_reset(&dtls_srtp->ssl);
+    ret = mbedtls_ssl_session_reset(&dtls_srtp->ssl);
+    if (ret != 0) {
+      LOGE("mbedtls_ssl_session_reset failed -0x%.4x", (unsigned int)-ret);
+      break;
+    }
 
-    mbedtls_ssl_set_client_transport_id(&dtls_srtp->ssl, client_ip, sizeof(client_ip));
+    ret = mbedtls_ssl_set_client_transport_id(&dtls_srtp->ssl, client_ip, sizeof(client_ip));
+    if (ret != 0) {
+      LOGE("mbedtls_ssl_set_client_transport_id failed -0x%.4x", (unsigned int)-ret);
+      break;
+    }
 
     ret = dtls_srtp_do_handshake(dtls_srtp);
 
@@ -653,7 +670,7 @@ static int dtls_srtp_handshake_client(DtlsSrtp* dtls_srtp) {
   return ret;
 }
 
-int dtls_srtp_handshake(DtlsSrtp* dtls_srtp, Address* addr) {
+int dtls_srtp_handshake(DtlsSrtp* dtls_srtp, Address* addr, const char* remote_fingerprint) {
   int ret;
   dtls_srtp->remote_addr = addr;
   if (dtls_srtp->state != DTLS_SRTP_STATE_INIT) {
@@ -667,13 +684,18 @@ int dtls_srtp_handshake(DtlsSrtp* dtls_srtp, Address* addr) {
     ret = dtls_srtp_handshake_client(dtls_srtp);
   }
 
+  if (ret != 0) {
+    return ret;
+  }
+
   const mbedtls_x509_crt* remote_crt;
   if ((remote_crt = mbedtls_ssl_get_peer_cert(&dtls_srtp->ssl)) != NULL) {
     dtls_srtp_x509_digest(remote_crt, dtls_srtp->actual_remote_fingerprint);
 
-    if (strncmp(dtls_srtp->remote_fingerprint, dtls_srtp->actual_remote_fingerprint, DTLS_SRTP_FINGERPRINT_LENGTH) != 0) {
+    if (strncmp(remote_fingerprint, dtls_srtp->actual_remote_fingerprint,
+                DTLS_SRTP_FINGERPRINT_LENGTH) != 0) {
       LOGE("Actual and Expected Fingerprint mismatch: %s %s",
-           dtls_srtp->remote_fingerprint,
+           remote_fingerprint,
            dtls_srtp->actual_remote_fingerprint);
       return -1;
     }
@@ -683,20 +705,12 @@ int dtls_srtp_handshake(DtlsSrtp* dtls_srtp, Address* addr) {
     return -1;
   }
 
+  dtls_srtp->state = DTLS_SRTP_STATE_CONNECTED;
+
   mbedtls_dtls_srtp_info dtls_srtp_negotiation_result;
   mbedtls_ssl_get_dtls_srtp_negotiation_result(&dtls_srtp->ssl, &dtls_srtp_negotiation_result);
 
   return ret;
-}
-
-void dtls_srtp_reset_session(DtlsSrtp* dtls_srtp) {
-  if (dtls_srtp->state == DTLS_SRTP_STATE_CONNECTED) {
-    srtp_dealloc(dtls_srtp->srtp_in);
-    srtp_dealloc(dtls_srtp->srtp_out);
-    mbedtls_ssl_session_reset(&dtls_srtp->ssl);
-  }
-
-  dtls_srtp->state = DTLS_SRTP_STATE_INIT;
 }
 
 int dtls_srtp_write(DtlsSrtp* dtls_srtp, const unsigned char* buf, size_t len) {
@@ -739,8 +753,8 @@ void dtls_srtp_decrypt_rtcp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* by
   srtp_unprotect_rtcp(dtls_srtp->srtp_in, packet, bytes);
 }
 
-void dtls_srtp_encrypt_rtp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes) {
-  srtp_protect(dtls_srtp->srtp_out, packet, bytes);
+int dtls_srtp_encrypt_rtp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes) {
+  return (int)srtp_protect(dtls_srtp->srtp_out, packet, bytes);
 }
 
 void dtls_srtp_encrypt_rctp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes) {

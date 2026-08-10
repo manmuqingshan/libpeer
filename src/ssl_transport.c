@@ -28,9 +28,9 @@ static int ssl_transport_mbedtls_recv_timeout(void* ctx, unsigned char* buf, siz
 
   ret = select(((TcpSocket*)ctx)->fd + 1, &read_fds, NULL, NULL, &tv);
   if (ret < 0) {
-    return -1;
+    return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
   } else if (ret == 0) {
-    // timeout
+    return MBEDTLS_ERR_SSL_TIMEOUT;
   } else {
     if (FD_ISSET(((TcpSocket*)ctx)->fd, &read_fds)) {
       ret = tcp_socket_recv((TcpSocket*)ctx, buf, len);
@@ -116,9 +116,12 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
   LOGI("start to handshake");
 
   while ((ret = mbedtls_ssl_handshake(&net_ctx->ssl)) != 0) {
-    if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-      LOGE("ssl handshake error: -0x%x", (unsigned int)-ret);
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+      continue;
     }
+
+    LOGE("ssl handshake error: -0x%x", (unsigned int)-ret);
+    return -1;
   }
 
   LOGI("handshake success");

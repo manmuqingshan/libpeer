@@ -50,7 +50,9 @@ struct Agent {
 
   Address host_addr;
   int b_host_addr;
-  uint64_t binding_request_time;
+  uint32_t binding_request_sent_time;
+  uint8_t binding_request_transaction_id[12];
+  int binding_request_pending;
 
   AgentMode mode;
 
@@ -78,6 +80,8 @@ void agent_set_remote_description(Agent* agent, char* description);
 int agent_select_candidate_pair(Agent* agent);
 
 int agent_connectivity_check(Agent* agent);
+
+int agent_send_binding_request(Agent* agent);
 
 void agent_clear_candidates(Agent* agent);
 

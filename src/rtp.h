@@ -35,27 +35,27 @@ typedef enum RtpSsrc {
 } RtpSsrc;
 
 typedef struct RtpHeader {
-#if __BYTE_ORDER == __BIG_ENDIAN
-  uint16_t version : 2;
-  uint16_t padding : 1;
-  uint16_t extension : 1;
-  uint16_t csrccount : 4;
-  uint16_t markerbit : 1;
-  uint16_t type : 7;
-#elif __BYTE_ORDER == __LITTLE_ENDIAN
-  uint16_t csrccount : 4;
-  uint16_t extension : 1;
-  uint16_t padding : 1;
-  uint16_t version : 2;
-  uint16_t type : 7;
-  uint16_t markerbit : 1;
-#endif
+  uint8_t vpxcc; /* Version, Padding, Extension, CSRC count */
+  uint8_t mpt;   /* Marker, Payload Type */
   uint16_t seq_number;
   uint32_t timestamp;
   uint32_t ssrc;
   uint32_t csrc[0];
 
 } RtpHeader;
+
+static inline void rtp_header_init(RtpHeader* header, uint8_t type) {
+  header->vpxcc = 0x80U;
+  header->mpt = type & 0x7fU;
+}
+
+static inline uint8_t rtp_header_type(const RtpHeader* header) {
+  return header->mpt & 0x7fU;
+}
+
+static inline void rtp_header_set_marker(RtpHeader* header) {
+  header->mpt |= 0x80U;
+}
 
 typedef struct RtpPacket {
   RtpHeader header;

@@ -93,6 +93,29 @@ static int sctp_outgoing_data_cb(void* userdata, void* buf, size_t len, uint8_t 
   return 0;
 }
 
+#if !CONFIG_USE_USRSCTP
+static int sctp_next_stream_sequence(Sctp* sctp, uint16_t sid, uint16_t* sequence) {
+  int i;
+
+  for (i = 0; i < sctp->outgoing_stream_count; i++) {
+    if (sctp->outgoing_streams[i].sid == sid) {
+      *sequence = sctp->outgoing_streams[i].next_sequence++;
+      return 0;
+    }
+  }
+
+  if (sctp->outgoing_stream_count >= SCTP_MAX_STREAMS) {
+    return -1;
+  }
+
+  sctp->outgoing_streams[sctp->outgoing_stream_count].sid = sid;
+  sctp->outgoing_streams[sctp->outgoing_stream_count].next_sequence = 1;
+  sctp->outgoing_stream_count++;
+  *sequence = 0;
+  return 0;
+}
+#endif
+
 int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid) {
 #if CONFIG_USE_USRSCTP
   int res;
@@ -113,7 +136,11 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
   size_t padding_len = 0;
   size_t payload_max = SCTP_MTU - sizeof(SctpPacket) - sizeof(SctpDataChunk);
   size_t pos = 0;
-  static uint16_t sqn = 0;
+  uint16_t stream_seq = 0;
+
+  if (ppid == PPID_CONTROL && sctp_next_stream_sequence(sctp, sid, &stream_seq) != 0) {
+    return -1;
+  }
 
   SctpPacket* packet = (SctpPacket*)(sctp->buf);
   SctpDataChunk* chunk = (SctpDataChunk*)(packet->chunks);
@@ -123,9 +150,10 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
   packet->header.verification_tag = sctp->verification_tag;
 
   chunk->type = SCTP_DATA;
-  chunk->iube = 0x06;
-  chunk->sid = htons(0);
-  chunk->sqn = htons(sqn++);
+  /* DCEP OPEN/ACK control messages must be sent reliably and in order. */
+  chunk->iube = ppid == PPID_CONTROL ? 0x02 : 0x06;
+  chunk->sid = htons(sid);
+  chunk->sqn = htons(stream_seq);
   chunk->ppid = htonl(ppid);
 
   while (len > payload_max) {
@@ -137,7 +165,7 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
     packet->header.checksum = sctp_get_checksum(sctp, (const uint8_t*)sctp->buf, SCTP_MTU);
 
     sctp_outgoing_data_cb(sctp, sctp->buf, SCTP_MTU, 0, 0);
-    chunk->iube = 0x04;
+    chunk->iube = ppid == PPID_CONTROL ? 0x00 : 0x04;
     len -= payload_max;
     pos += payload_max;
   }
@@ -213,15 +241,19 @@ void sctp_handle_sctp_packet(Sctp* sctp, char* buf, size_t len) {
 }
 
 void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
-  if (!sctp)
+  if (!sctp || !buf)
     return;
 
 #if CONFIG_USE_USRSCTP
   sctp_handle_sctp_packet(sctp, buf, len);
   usrsctp_conninput(sctp, buf, len, 0);
 #else
+  if (len < sizeof(SctpHeader))
+    return;
+
   size_t length = 0;
   size_t pos = sizeof(SctpHeader);
+  uint16_t chunk_len;
   SctpChunkCommon* chunk_common;
   SctpPacket* in_packet = (SctpPacket*)buf;
   SctpPacket* out_packet = (SctpPacket*)sctp->buf;
@@ -244,42 +276,65 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
 
   // prepare outgoing packet
   memset(sctp->buf, 0, sizeof(sctp->buf));
-  while ((4 * (pos + 3) / 4) < len) {
+  while (pos + sizeof(SctpChunkCommon) <= len) {
     chunk_common = (SctpChunkCommon*)(buf + pos);
+    chunk_len = ntohs(chunk_common->length);
+    if (chunk_len < sizeof(SctpChunkCommon) || pos + chunk_len > len) {
+      LOGW("Invalid SCTP chunk length=%u", chunk_len);
+      return;
+    }
 
     switch (chunk_common->type) {
       case SCTP_DATA: {
         SctpDataChunk* data_chunk = (SctpDataChunk*)(buf + pos);
         SctpSackChunk* sack_chunk = (SctpSackChunk*)out_packet->chunks;
+        uint16_t payload_len;
+        uint32_t ppid;
+        uint16_t sid;
+
+        if (chunk_len < sizeof(SctpDataChunk)) {
+          return;
+        }
+        payload_len = chunk_len - sizeof(SctpDataChunk);
+        ppid = ntohl(data_chunk->ppid);
+        sid = ntohs(data_chunk->sid);
 
         sack_chunk->common.type = SCTP_SACK;
         sack_chunk->common.flags = 0x00;
         sack_chunk->common.length = htons(16);
         sack_chunk->cumulative_tsn_ack = data_chunk->tsn;
-        sack_chunk->a_rwnd = htonl(0x02);
+        sack_chunk->a_rwnd = htonl((uint32_t)sizeof(sctp->buf));
         length = ntohs(sack_chunk->common.length) + sizeof(SctpHeader);
 
-        LOGD("SCTP_DATA. ppid = %ld, data = %.2x", ntohl(data_chunk->ppid), data_chunk->data[0]);
-        if (ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_CONTROL && data_chunk->data[0] == DATA_CHANNEL_OPEN) {
+        if (ppid == DATA_CHANNEL_PPID_CONTROL && payload_len > 0 &&
+            data_chunk->data[0] == DATA_CHANNEL_OPEN) {
+          uint16_t ack_sequence;
+
+          if (sctp_next_stream_sequence(sctp, sid, &ack_sequence) != 0) {
+            return;
+          }
           data_chunk = (SctpDataChunk*)sack_chunk->blocks;
           data_chunk->type = SCTP_DATA;
           data_chunk->iube = 0x03;
           data_chunk->tsn = htonl(sctp->tsn++);
-          data_chunk->sid = htons(0);
-          data_chunk->sqn = htons(0);
+          data_chunk->sid = htons(sid);
+          data_chunk->sqn = htons(ack_sequence);
           data_chunk->ppid = htonl(DATA_CHANNEL_PPID_CONTROL);
           data_chunk->length = htons(1 + sizeof(SctpDataChunk));
           data_chunk->data[0] = DATA_CHANNEL_ACK;
           length += ntohs(data_chunk->length);
-        } else if (ntohl(data_chunk->ppid) == DATA_CHANNEL_PPID_DOMSTRING) {
+        } else if (ppid == DATA_CHANNEL_PPID_DOMSTRING) {
           if (sctp->onmessage) {
-            sctp->onmessage((char*)data_chunk->data, ntohs(data_chunk->length) - sizeof(SctpDataChunk),
-                            sctp->userdata, ntohs(data_chunk->sid));
+            sctp->onmessage((char*)data_chunk->data, payload_len,
+                            sctp->userdata, sid);
           }
         }
         pos = len;  // Do not handle other msg
       } break;
       case SCTP_INIT: {
+        if (chunk_len < sizeof(SctpInitChunk)) {
+          return;
+        }
         LOGD("SCTP_INIT");
 
         SctpInitChunk* init_chunk;
@@ -303,14 +358,11 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         *(uint32_t*)&param->value = htonl(0x02);
         length = ntohs(init_ack->common.length) + sizeof(SctpHeader);
 
-        if (!sctp->connected) {
-          sctp->connected = 1;
-          if (sctp->onopen) {
-            sctp->onopen(sctp->userdata);
-          }
-        }
       } break;
       case SCTP_INIT_ACK: {
+        if (chunk_len < sizeof(SctpInitChunk)) {
+          return;
+        }
         SctpInitChunk* init_ack = (SctpInitChunk*)in_packet->chunks;
         SctpCookieEchoChunk* cookie_echo = (SctpCookieEchoChunk*)out_packet->chunks;
         SctpChunkParam* param = NULL;
@@ -336,14 +388,11 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         memcpy(cookie_echo->cookie, param->value, ntohs(param->length) - 4);
         length = ntohs(cookie_echo->common.length) + sizeof(SctpHeader);
 
-        if (!sctp->connected) {
-          sctp->connected = 1;
-          if (sctp->onopen) {
-            sctp->onopen(sctp->userdata);
-          }
-        }
       } break;
       case SCTP_SACK:
+        if (chunk_len < sizeof(SctpSackChunk)) {
+          return;
+        }
 #if 0
         LOGD("SCTP_SACK");
         sack = (SctpSackChunk*)in_packet->chunks;
@@ -375,6 +424,16 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         }
 #endif
         break;
+      case SCTP_HEARTBEAT: {
+        SctpChunkCommon* heartbeat_ack = (SctpChunkCommon*)out_packet->chunks;
+
+        memcpy(heartbeat_ack, chunk_common, chunk_len);
+        heartbeat_ack->type = SCTP_HEARTBEAT_ACK;
+        length = chunk_len + sizeof(SctpHeader);
+        pos = len;  // Echo the HEARTBEAT-INFO parameter unchanged.
+      } break;
+      case SCTP_HEARTBEAT_ACK:
+        break;
       case SCTP_COOKIE_ECHO: {
         LOGD("SCTP_COOKIE_ECHO");
         SctpChunkCommon* common = (SctpChunkCommon*)out_packet->chunks;
@@ -382,8 +441,20 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
         common->length = htons(4);
         length = ntohs(common->length) + sizeof(SctpHeader);
         pos = len;  // Do not handle other msg
+        if (!sctp->connected) {
+          sctp->connected = 1;
+          if (sctp->onopen) {
+            sctp->onopen(sctp->userdata);
+          }
+        }
       } break;
       case SCTP_COOKIE_ACK: {
+        if (!sctp->connected) {
+          sctp->connected = 1;
+          if (sctp->onopen) {
+            sctp->onopen(sctp->userdata);
+          }
+        }
         break;
       }
       case SCTP_ABORT:
@@ -410,7 +481,7 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
       dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length);
       // sctp_outgoing_data_cb(sctp, sctp->buf, SCTP_MTU, 0, 0);
     }
-    pos += ntohs(chunk_common->length);
+    pos += 4 * ((chunk_len + 3) / 4);
   }
 #endif
 }
@@ -509,6 +580,8 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
   sctp->local_port = 5000;
   sctp->remote_port = 5000;
   sctp->tsn = 1234;
+  sctp->outgoing_stream_count = 0;
+  memset(sctp->outgoing_streams, 0, sizeof(sctp->outgoing_streams));
 #if CONFIG_USE_USRSCTP
   int ret = -1;
   usrsctp_sysctl_set_sctp_ecn_enable(0);

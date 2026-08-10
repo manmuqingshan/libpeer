@@ -78,9 +78,9 @@ typedef struct DtlsSrtp {
 
   DtlsSrtpRole role;
   DtlsSrtpState state;
+  int initialized;
 
   char local_fingerprint[DTLS_SRTP_FINGERPRINT_LENGTH];
-  char remote_fingerprint[DTLS_SRTP_FINGERPRINT_LENGTH];
   char actual_remote_fingerprint[DTLS_SRTP_FINGERPRINT_LENGTH];
 
   void* user_data;
@@ -93,9 +93,7 @@ void dtls_srtp_deinit(DtlsSrtp* dtls_srtp);
 
 int dtls_srtp_create_cert(DtlsSrtp* dtls_srtp);
 
-int dtls_srtp_handshake(DtlsSrtp* dtls_srtp, Address* addr);
-
-void dtls_srtp_reset_session(DtlsSrtp* dtls_srtp);
+int dtls_srtp_handshake(DtlsSrtp* dtls_srtp, Address* addr, const char* remote_fingerprint);
 
 int dtls_srtp_write(DtlsSrtp* dtls_srtp, const uint8_t* buf, size_t len);
 
@@ -109,7 +107,7 @@ void dtls_srtp_decrypt_rtp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* byt
 
 void dtls_srtp_decrypt_rtcp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes);
 
-void dtls_srtp_encrypt_rtp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes);
+int dtls_srtp_encrypt_rtp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes);
 
 void dtls_srtp_encrypt_rctp_packet(DtlsSrtp* dtls_srtp, uint8_t* packet, int* bytes);
 

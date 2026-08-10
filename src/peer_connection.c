@@ -26,6 +26,7 @@ struct PeerConnection {
   DtlsSrtp dtls_srtp;
   Sctp sctp;
   DtlsSrtpRole role;
+  char remote_fingerprint[DTLS_SRTP_FINGERPRINT_LENGTH];
 
   char sdp[CONFIG_SDP_BUFFER_SIZE];
 
@@ -49,8 +50,13 @@ struct PeerConnection {
 
 static void peer_connection_outgoing_rtp_packet(uint8_t* data, size_t size, void* user_data) {
   PeerConnection* pc = (PeerConnection*)user_data;
-  dtls_srtp_encrypt_rtp_packet(&pc->dtls_srtp, data, (int*)&size);
-  agent_send(&pc->agent, data, size);
+  int packet_len = (int)size;
+
+  if (dtls_srtp_encrypt_rtp_packet(&pc->dtls_srtp, data, &packet_len) != 0) {
+    return;
+  }
+
+  agent_send(&pc->agent, data, packet_len);
 }
 
 static int peer_connection_dtls_srtp_recv(void* ctx, unsigned char* buf, size_t len) {
@@ -94,7 +100,7 @@ static void peer_connection_incoming_rtcp(PeerConnection* pc, uint8_t* buf, size
     switch (rtcp_header->type) {
       case RTCP_RR:
         LOGD("RTCP_PR");
-        if (rtcp_header->rc > 0) {
+        if (rtcp_header_rc(rtcp_header) > 0) {
 // TODO: REMB, GCC ...etc
 #if 0
           RtcpRr rtcp_rr = rtcp_parse_rr(buf);
@@ -108,7 +114,7 @@ static void peer_connection_incoming_rtcp(PeerConnection* pc, uint8_t* buf, size
         }
         break;
       case RTCP_PSFB: {
-        int fmt = rtcp_header->rc;
+        int fmt = rtcp_header_rc(rtcp_header);
         LOGD("RTCP_PSFB %d", fmt);
         // PLI and FIR
         if ((fmt == 1 || fmt == 4) && pc->config.on_request_keyframe) {
@@ -257,12 +263,13 @@ int peer_connection_create_datachannel_sid(PeerConnection* pc, DecpChannelType c
   // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
   int msg_size = 12 + strlen(label) + strlen(protocol);
   uint16_t priority_big_endian = htons(priority);
-  uint32_t reliability_big_endian = ntohl(reliability_parameter);
+  uint32_t reliability_big_endian = htonl(reliability_parameter);
   uint16_t label_length = htons(strlen(label));
   uint16_t protocol_length = htons(strlen(protocol));
   char* msg = calloc(1, msg_size);
 
   msg[0] = DATA_CHANNEL_OPEN;
+  msg[1] = (uint8_t)channel_type;
   memcpy(msg + 2, &priority_big_endian, sizeof(uint16_t));
   memcpy(msg + 4, &reliability_big_endian, sizeof(uint32_t));
   memcpy(msg + 8, &label_length, sizeof(uint16_t));
@@ -290,7 +297,8 @@ int peer_connection_loop(PeerConnection* pc) {
     case PEER_CONNECTION_CHECKING:
       if (pc->agent.selected_pair) {
         // if ice candidate pass the connectivity check, then we can start DTLS-SRTP handshake
-        dtls_srtp_handshake(&pc->dtls_srtp, NULL);
+        dtls_srtp_handshake(&pc->dtls_srtp, NULL,
+                            pc->remote_fingerprint);
       } else {
         agent_connectivity_check(&pc->agent);
       }
@@ -340,10 +348,25 @@ int peer_connection_loop(PeerConnection* pc) {
         }
       }
 
-      if (CONFIG_KEEPALIVE_TIMEOUT > 0 && (ports_get_epoch_time() - pc->agent.binding_request_time) > CONFIG_KEEPALIVE_TIMEOUT) {
-        LOGI("binding request timeout");
-        STATE_CHANGED(pc, PEER_CONNECTION_CLOSED);
+#if CONFIG_STUN_KEEPALIVE_INTERVAL > 0
+      {
+        uint32_t elapsed =
+            (uint32_t)(ports_get_epoch_time() - pc->agent.binding_request_sent_time);
+
+        if (pc->agent.binding_request_pending) {
+          if (elapsed >= CONFIG_STUN_KEEPALIVE_TIMEOUT) {
+            LOGW("STUN keepalive response timeout");
+            STATE_CHANGED(pc, PEER_CONNECTION_CLOSED);
+          }
+        } else if (elapsed >= CONFIG_STUN_KEEPALIVE_INTERVAL) {
+          if (agent_send_binding_request(&pc->agent) < 0) {
+            LOGW("Failed to send STUN keepalive");
+          } else {
+            LOGD("Sent STUN keepalive");
+          }
+        }
       }
+#endif
 
       break;
     case PEER_CONNECTION_FAILED:
@@ -379,7 +402,14 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
     }
 
     if (strstr(buf, "a=fingerprint")) {
-      strncpy(pc->dtls_srtp.remote_fingerprint, buf + 22, DTLS_SRTP_FINGERPRINT_LENGTH);
+      const char* fingerprint = buf + 22;
+      size_t fingerprint_len = strlen(fingerprint);
+
+      if (fingerprint_len >= sizeof(pc->remote_fingerprint)) {
+        LOGE("remote fingerprint is too long");
+        return;
+      }
+      memcpy(pc->remote_fingerprint, fingerprint, fingerprint_len + 1);
     }
 
     if (strstr(buf, "a=ice-ufrag") &&
@@ -421,6 +451,9 @@ void peer_connection_set_local_description(PeerConnection* pc, const char* sdp, 
   }
   pc->sctp.connected = 0;
 
+  dtls_srtp_deinit(&pc->dtls_srtp);
+  memset(&pc->dtls_srtp, 0, sizeof(pc->dtls_srtp));
+
   switch (sdp_type) {
     case SDP_TYPE_OFFER:
       pc->role = DTLS_SRTP_ROLE_SERVER;
@@ -435,8 +468,11 @@ void peer_connection_set_local_description(PeerConnection* pc, const char* sdp, 
       break;
   }
 
-  dtls_srtp_reset_session(&pc->dtls_srtp);
-  dtls_srtp_init(&pc->dtls_srtp, pc->role, pc);
+  if (dtls_srtp_init(&pc->dtls_srtp, pc->role, pc) != 0) {
+    LOGE("dtls_srtp_init failed");
+    STATE_CHANGED(pc, PEER_CONNECTION_FAILED);
+    return;
+  }
   pc->dtls_srtp.udp_recv = peer_connection_dtls_srtp_recv;
   pc->dtls_srtp.udp_send = peer_connection_dtls_srtp_send;
 
@@ -584,6 +620,5 @@ int peer_connection_add_ice_candidate(PeerConnection* pc, char* candidate) {
 
   LOGD("Add candidate: %s", candidate);
   agent->remote_candidates_count++;
-LOGI("");
   return 0;
 }
