@@ -35,5 +35,5 @@ if(CONFIG_LIBPEER)
   )
 
   zephyr_library_link_libraries(cjson)
-  zephyr_library_link_libraries(libsrtp)
+  zephyr_library_link_libraries(srtp)
 endif()
