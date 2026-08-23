@@ -3,10 +3,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "mbedtls/ctr_drbg.h"
 #include "mbedtls/debug.h"
-#include "mbedtls/entropy.h"
 #include "mbedtls/ssl.h"
+#include "mbedtls/version.h"
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+#include "psa/crypto.h"
+#endif
 
 #include <sys/select.h>
 #include "config.h"
@@ -26,9 +28,9 @@ static int ssl_transport_mbedtls_recv_timeout(void* ctx, unsigned char* buf, siz
 
   ret = select(((TcpSocket*)ctx)->fd + 1, &read_fds, NULL, NULL, &tv);
   if (ret < 0) {
-    return -1;
+    return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
   } else if (ret == 0) {
-    // timeout
+    return MBEDTLS_ERR_SSL_TIMEOUT;
   } else {
     if (FD_ISSET(((TcpSocket*)ctx)->fd, &read_fds)) {
       ret = tcp_socket_recv((TcpSocket*)ctx, buf, len);
@@ -56,6 +58,12 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
   mbedtls_ctr_drbg_init(&net_ctx->ctr_drbg);
   mbedtls_entropy_init(&net_ctx->entropy);
 
+#if MBEDTLS_VERSION_NUMBER >= 0x04000000
+  if (psa_crypto_init() != PSA_SUCCESS) {
+    return -1;
+  }
+#endif
+
   if ((ret = mbedtls_ctr_drbg_seed(&net_ctx->ctr_drbg, mbedtls_entropy_func, &net_ctx->entropy,
                                    (const unsigned char*)pers, strlen(pers))) != 0) {
     return -1;
@@ -79,7 +87,9 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
   mbedtls_ssl_conf_ca_chain(&net_ctx->conf, &net_ctx->cacert, NULL);
   */
 
+#if MBEDTLS_VERSION_NUMBER < 0x04000000
   mbedtls_ssl_conf_rng(&net_ctx->conf, mbedtls_ctr_drbg_random, &net_ctx->ctr_drbg);
+#endif
 
   if ((ret = mbedtls_ssl_setup(&net_ctx->ssl, &net_ctx->conf)) != 0) {
     LOGE("ssl setup error: -0x%x", (unsigned int)-ret);
@@ -106,9 +116,12 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
   LOGI("start to handshake");
 
   while ((ret = mbedtls_ssl_handshake(&net_ctx->ssl)) != 0) {
-    if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-      LOGE("ssl handshake error: -0x%x", (unsigned int)-ret);
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+      continue;
     }
+
+    LOGE("ssl handshake error: -0x%x", (unsigned int)-ret);
+    return -1;
   }
 
   LOGI("handshake success");

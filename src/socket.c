@@ -1,6 +1,5 @@
 #include <errno.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "socket.h"
 #include "utils.h"
@@ -10,17 +9,17 @@ int udp_socket_add_multicast_group(UdpSocket* udp_socket, Address* mcast_addr) {
   struct ip_mreq imreq = {0};
   struct in_addr iaddr = {0};
 
-  imreq.imr_interface.s_addr = INADDR_ANY;
   // IPV4 only
   imreq.imr_multiaddr.s_addr = mcast_addr->sin.sin_addr.s_addr;
+  imreq.imr_interface.s_addr = INADDR_ANY;
 
   if ((ret = setsockopt(udp_socket->fd, IPPROTO_IP, IP_MULTICAST_IF, &iaddr, sizeof(struct in_addr))) < 0) {
     LOGE("Failed to set IP_MULTICAST_IF: %d", ret);
     return ret;
   }
 
-  if ((ret = setsockopt(udp_socket->fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &imreq, sizeof(struct ip_mreq))) < 0) {
-    LOGE("Failed to set IP_ADD_MEMBERSHIP: %d", ret);
+  if ((ret = setsockopt(udp_socket->fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &imreq, sizeof(imreq))) < 0) {
+    LOGE("Failed to set IP_ADD_MEMBERSHIP: %d errno=%d", ret, errno);
     return ret;
   }
 

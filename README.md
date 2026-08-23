@@ -31,13 +31,18 @@ libpeer is a WebRTC implementation written in C, developed with BSD socket. The 
 - Copy URL from the test [website](https://sepfy.github.io/libpeer)
 - Build and run the example
 ```bash
-$ sudo apt -y install git cmake
+$ sudo apt -y install git cmake wget ffmpeg
 $ git clone --recursive https://github.com/sepfy/libpeer
 $ cd libpeer
 $ cmake -S . -B build && cmake --build build
-$ wget http://www.live555.com/liveMedia/public/264/test.264 # Download test video file
-$ wget https://mauvecloud.net/sounds/alaw08m.wav # Download test audio file
-$ ./examples/generic/sample -u <URL>
+$ wget -O sample.mp4 \
+    https://download.samplelib.com/mp4/sample-30s.mp4
+$ ffmpeg -i sample.mp4 \
+    -map 0:v:0 -vf fps=25 -c:v libx264 -profile:v baseline -pix_fmt yuv420p \
+    -x264-params bframes=0:keyint=25:min-keyint=25:scenecut=0:repeat-headers=1 \
+    -f h264 test.264 \
+    -map 0:a:0 -ac 1 -ar 8000 -c:a pcm_alaw -f wav test.wav
+$ ./build/examples/generic/sample -u <URL>
 ```
 - Click Connect button on the website
 

@@ -3,8 +3,21 @@
 
 #ifndef DISABLE_PEER_SIGNALING
 
+#if defined(__has_include)
+#if __has_include(<mbedtls/ctr_drbg.h>)
+#include <mbedtls/ctr_drbg.h>
+#else
+#include <mbedtls/private/ctr_drbg.h>
+#endif
+#if __has_include(<mbedtls/entropy.h>)
+#include <mbedtls/entropy.h>
+#else
+#include <mbedtls/private/entropy.h>
+#endif
+#else
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
+#endif
 #include <mbedtls/ssl.h>
 #include <stdint.h>
 

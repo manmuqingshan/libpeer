@@ -1,14 +1,8 @@
 #ifndef RTCP_H_
 #define RTCP_H_
 
-#ifdef __BYTE_ORDER
-#define __BIG_ENDIAN 4321
-#define __LITTLE_ENDIAN 1234
-#elif __APPLE__
-#include <machine/endian.h>
-#else
-#include <endian.h>
-#endif
+#include <stddef.h>
+#include <stdint.h>
 
 typedef enum RtcpType {
 
@@ -25,20 +19,28 @@ typedef enum RtcpType {
 } RtcpType;
 
 typedef struct RtcpHeader {
-#if __BYTE_ORDER == __BIG_ENDIAN
-  uint16_t version : 2;
-  uint16_t padding : 1;
-  uint16_t rc : 5;
-  uint16_t type : 8;
-#elif __BYTE_ORDER == __LITTLE_ENDIAN
-  uint16_t rc : 5;
-  uint16_t padding : 1;
-  uint16_t version : 2;
-  uint16_t type : 8;
-#endif
-  uint16_t length : 16;
+  uint8_t vprc; /* Version, Padding, Report count/Feedback message type */
+  uint8_t type; /* Packet Type */
+  uint16_t length;
 
 } RtcpHeader;
+
+static inline void rtcp_header_init(RtcpHeader* header, uint8_t type, uint8_t rc) {
+  header->vprc = 0x80U | (rc & 0x1fU);
+  header->type = type;
+}
+
+static inline uint8_t rtcp_header_version(const RtcpHeader* header) {
+  return (header->vprc >> 6) & 0x03U;
+}
+
+static inline uint8_t rtcp_header_padding(const RtcpHeader* header) {
+  return (header->vprc >> 5) & 0x01U;
+}
+
+static inline uint8_t rtcp_header_rc(const RtcpHeader* header) {
+  return header->vprc & 0x1fU;
+}
 
 typedef struct RtcpReportBlock {
   uint32_t ssrc;

@@ -11,6 +11,9 @@
 #include "lwip/netdb.h"
 #include "lwip/netif.h"
 #include "lwip/sys.h"
+#elif CONFIG_USE_ZEPHYR
+#include <zephyr/net/net_if.h>
+#include <zephyr/posix/netdb.h>
 #else
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -51,6 +54,29 @@ int ports_get_host_addr(Address* addr, const char* iface_prefix) {
       break;
     }
   }
+#elif CONFIG_USE_ZEPHYR
+  struct net_if* iface;
+  struct in_addr* ifaddr;
+  uint16_t port;
+
+  ARG_UNUSED(iface_prefix);
+  port = addr->port;
+  iface = net_if_get_default();
+  if (iface == NULL) {
+    LOGE("No default network interface");
+    return 0;
+  }
+
+  ifaddr = net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED);
+  if (ifaddr == NULL) {
+    LOGE("No global IPv4 address on default interface");
+    return 0;
+  }
+
+  addr_set_family(addr, AF_INET);
+  addr_set_port(addr, port);
+  addr->sin.sin_addr = *ifaddr;
+  ret = 1;
 #else
 
   struct ifaddrs *ifaddr, *ifa;

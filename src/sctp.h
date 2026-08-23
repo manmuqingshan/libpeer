@@ -147,6 +147,11 @@ typedef struct {
   uint16_t sid;    // Stream ID
 } SctpStreamEntry;
 
+typedef struct {
+  uint16_t sid;
+  uint16_t next_sequence;
+} SctpOutgoingStream;
+
 typedef struct Sctp {
   struct socket* sock;
 
@@ -158,6 +163,8 @@ typedef struct Sctp {
   DtlsSrtp* dtls_srtp;
   int stream_count;
   SctpStreamEntry stream_table[SCTP_MAX_STREAMS];
+  int outgoing_stream_count;
+  SctpOutgoingStream outgoing_streams[SCTP_MAX_STREAMS];
 
   /* datachannel */
   void (*onmessage)(char* msg, size_t len, void* userdata, uint16_t sid);

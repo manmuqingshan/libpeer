@@ -1,14 +1,22 @@
 #ifndef ADDRESS_H_
 #define ADDRESS_H_
 
+#include <stdint.h>
+
 #include "config.h"
-#if CONFIG_USE_LWIP
+
+#if CONFIG_USE_ZEPHYR
+#include <zephyr/posix/arpa/inet.h>
+#include <zephyr/posix/netinet/in.h>
+#include <zephyr/posix/sys/socket.h>
+#include <zephyr/posix/unistd.h>
+#elif CONFIG_USE_LWIP
 #include <lwip/sockets.h>
 #else
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #endif
-#include <stdint.h>
 
 #define ADDRSTRLEN INET6_ADDRSTRLEN
 
